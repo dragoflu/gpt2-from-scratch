@@ -7,7 +7,10 @@ import math
 import tiktoken
 import urllib.request
 import os
-# from datasets import load_dataset
+from datasets import load_dataset
+from peft import LoraConfig, get_peft_model, PeftModel
+
+
 
 if torch.cuda.is_available():
     device = 'cuda'
@@ -198,49 +201,111 @@ text = urllib.request.urlopen(url).read().decode('utf-8')
 enc = tiktoken.get_encoding('gpt2')
 data = torch.tensor(enc.encode(text), dtype = torch.long)
 
+def pad_to(data, seq_len, pad_token = 50256):
+    return data + [pad_token] * (seq_len - len(data)) 
+
+# processing single example
+def format_example(example):
+    inp = example['input']
+    inst = example['instruction']
+    output = example['output']
+    if inp:
+        promt = f"###Instruction:\n{inst}\n\n###Input:\n{inp}\n\n###Response:\n"
+    else:
+        promt = f"###Instruction:\n{inst}\n\n###Response:\n"
+    full = promt + output
+    return promt, full
+
+# processing whole dataset
+def process_dataset(data):
+    data = data['train']
+    examples = []
+    for ex in data:
+        promt, full = format_example(ex)
+        full_ids = enc.encode(full)
+        promt_len = len(enc.encode(promt))
+        examples.append((full_ids, promt_len)) # tokenized sentence and a boarder
+    return examples
+
+# returning sft batches
+def get_batch_sft(data, batch_size, block_size):
+    ix = torch.randint(0, len(data), (batch_size,))
+    batch = [data[i] for i in ix]
+    max_len = max(len(i[0]) for i in batch) - 1
+    xs, ys = [], []
+    for seq, promt_len in batch:
+        x = seq[:-1]
+        x = pad_to(x, max_len)
+        y = seq[1:]
+        y[:promt_len-1] = [-100] * (promt_len - 1) #masking promt tokens
+        y = pad_to(y, max_len, -100) # not training model on pad tokens
+        xs.append(torch.tensor(x, dtype = torch.long))
+        ys.append(torch.tensor(y, dtype = torch.long))
+    
+    x = torch.stack(xs)
+    y = torch.stack(ys)
+    return x, y
+
+
+# returning pretrained batches
 def get_batch(data, batch_size, block_size):
     ix = torch.randint(0, len(data) - block_size - 1, (batch_size,))
     x = torch.stack([data[i : i+block_size] for i in ix])
     y = torch.stack([data[i+1 : i+block_size+1] for i in ix])
     return x, y
+
+    
 #------------------------------------------------- TRAINING CYCLE
 model = GPT2(config)
 model.to(device)
 chkp_path = 'ckpt.path'
-optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
 start_step = 0
 
 #resuming from checkpoint if it exists
-if os.path.exists(chkp_path):
-    checkpoint = torch.load(chkp_path)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    start_step = checkpoint['step']
-    print(f'Checkpoint loaded. Resuming from step {start_step}.')
-else:
-    print('No checkpoint found. Starting training from scratch.')
+def load_checkpoint(model, optimizer, chkp_path):
+    if os.path.exists(chkp_path):
+        checkpoint = torch.load(chkp_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_step = checkpoint['step'] + 1
+        print(f'Checkpoint loaded. Resuming from step {start_step}.')
+        return start_step
+    else:
+        print('No checkpoint found. Starting training from scratch.')
+        return 0
 
-num_steps = 0
-
-for epoch in range(start_step, start_step + num_steps):
-    x, y = get_batch(data, 16, 256)
-    x = x.to(device)
-    y = y.to(device)
-    optimizer.zero_grad()
-    _, loss = model(x, y)
-    if epoch % 100 == 0:
-        print(f'"Epoch: {epoch + 1} | Loss: {loss:.4f}')
-    
-    # saving the state of the model 
-    if epoch % 1000 == 0:
-        torch.save({
-            'step': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-        }, chkp_path)
-        print(f'Checkpoint saved at step {epoch}.')
-    loss.backward()
-    optimizer.step()
+# full training loop (pretrained, sft, lora) with checkpointing
+def train_model(num_steps, mode, model, data, device, chkp_path = None, use_checkpoint = True):
+    if mode == 'pretrained':
+        learning_rate = 1e-3
+    elif mode == 'sft':
+        learning_rate = 3e-5
+    else:
+        learning_rate = 1e-4
+    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr = learning_rate)
+    start_step = load_checkpoint(model, optimizer, chkp_path) if use_checkpoint else 0
+    for epoch in range(start_step, start_step + num_steps):
+        if mode == 'pretrained':
+            x, y = get_batch(data, 16, 256)
+        else:
+            x, y = get_batch_sft(data, 16, 256)
+        x = x.to(device)
+        y = y.to(device)
+        optimizer.zero_grad()
+        _, loss = model(x, y)
+        if epoch % 10 == 0:
+            print(f'"Epoch: {epoch + 1} | Loss: {loss:.4f}')
+        
+        # saving the state of the model 
+        if epoch % 200 == 0 and use_checkpoint and chkp_path is not None:
+            torch.save({
+                'step': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }, chkp_path)
+            print(f'Checkpoint saved at step {epoch}.')
+        loss.backward()
+        optimizer.step()
 
 #-------------------------------------------------- copying prettrained weights from gpt2
 
@@ -280,5 +345,30 @@ def load_pretrained(model_type = 'gpt2', dropout = 0.0):
     return model
 
 #-------------------------------------------------- testing pretrained model
-gpt = load_pretrained('gpt2').to(device) 
-completion = complete(gpt, "Hello, i'm a chat model", max_new_tokens=100, temperature=0.9, top_k=50)
+base = load_pretrained('gpt2').to(device)
+
+# using Lora to speed up training
+lora_config = LoraConfig(r = 8,
+                         lora_alpha = 16,
+                         target_modules = ["c_attn", "c_proj", "c_fc"],
+                         lora_dropout = 0.05,
+                         bias = "none")
+#checkpoint load
+if os.path.exists('lora_sft_ckpt'):
+    gpt = PeftModel.from_pretrained(base, 'lora_sft_ckpt', is_trainable = True)
+else:
+    gpt = get_peft_model(base, lora_config)
+
+# sft data
+df = load_dataset('tatsu-lab/alpaca')
+examples = process_dataset(df)
+
+
+train_model(num_steps=1000,
+            mode = 'lora',
+            model = gpt,
+            data = examples,
+            device = device,
+            use_checkpoint=False)
+
+gpt.save_pretrained('lora_sft_ckpt')
