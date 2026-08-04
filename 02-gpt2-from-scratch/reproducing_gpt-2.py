@@ -9,6 +9,7 @@ import urllib.request
 import os
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model, PeftModel
+import json
 
 
 
@@ -204,6 +205,30 @@ data = torch.tensor(enc.encode(text), dtype = torch.long)
 def pad_to(data, seq_len, pad_token = 50256):
     return data + [pad_token] * (seq_len - len(data)) 
 
+
+#checkpoint load for lora
+def load_checkpoint_lora(model, chkp_path, loading = True):
+    if os.path.exists(chkp_path) and loading:
+        model = PeftModel.from_pretrained(model, chkp_path, is_trainable = True)
+        print(f'Checkpoint loaded from {chkp_path}.')
+    else:
+        model = get_peft_model(model, lora_config)
+        print('No checkpoint found. Starting training from scratch.')
+    return model
+
+#resuming from checkpoint if it exists
+def load_checkpoint(model, optimizer, chkp_path):
+    if os.path.exists(chkp_path):
+        checkpoint = torch.load(chkp_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_step = checkpoint['step'] + 1
+        print(f'Checkpoint loaded. Resuming from step {start_step}.')
+        return start_step
+    else:
+        print('No checkpoint found. Starting training from scratch.')
+        return 0
+
 # processing single example
 def format_example(example):
     inp = example['input']
@@ -222,7 +247,7 @@ def process_dataset(data):
     examples = []
     for ex in data:
         promt, full = format_example(ex)
-        full_ids = enc.encode(full)
+        full_ids = enc.encode(full)[:256]
         promt_len = len(enc.encode(promt))
         examples.append((full_ids, promt_len)) # tokenized sentence and a boarder
     return examples
@@ -256,26 +281,10 @@ def get_batch(data, batch_size, block_size):
 
     
 #------------------------------------------------- TRAINING CYCLE
-model = GPT2(config)
-model.to(device)
-chkp_path = 'ckpt.path'
-start_step = 0
-
-#resuming from checkpoint if it exists
-def load_checkpoint(model, optimizer, chkp_path):
-    if os.path.exists(chkp_path):
-        checkpoint = torch.load(chkp_path)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_step = checkpoint['step'] + 1
-        print(f'Checkpoint loaded. Resuming from step {start_step}.')
-        return start_step
-    else:
-        print('No checkpoint found. Starting training from scratch.')
-        return 0
 
 # full training loop (pretrained, sft, lora) with checkpointing
-def train_model(num_steps, mode, model, data, device, chkp_path = None, use_checkpoint = True):
+def train_model(num_steps, mode, model, train_data, val_data, device, chkp_path = None, use_checkpoint = True):
+    train_losses, val_losses = [], []
     if mode == 'pretrained':
         learning_rate = 1e-3
     elif mode == 'sft':
@@ -284,17 +293,23 @@ def train_model(num_steps, mode, model, data, device, chkp_path = None, use_chec
         learning_rate = 1e-4
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr = learning_rate)
     start_step = load_checkpoint(model, optimizer, chkp_path) if use_checkpoint else 0
+    total_train_loss = 0.0
     for epoch in range(start_step, start_step + num_steps):
         if mode == 'pretrained':
-            x, y = get_batch(data, 16, 256)
+            x, y = get_batch(train_data, 16, 256)
         else:
-            x, y = get_batch_sft(data, 16, 256)
+            x, y = get_batch_sft(train_data, 4, 256)
         x = x.to(device)
         y = y.to(device)
         optimizer.zero_grad()
         _, loss = model(x, y)
+        total_train_loss += loss.item()
         if epoch % 10 == 0:
-            print(f'"Epoch: {epoch + 1} | Loss: {loss:.4f}')
+            train_losses.append(total_train_loss/10)
+            val_loss = evaluate(model, val_data, mode, device, num_iters = 40)
+            val_losses.append(val_loss)
+            print(f'"Epoch: {epoch + 1} | Train Loss: {total_train_loss/10:.4f} | Val Loss: {val_loss:.4f}')
+            total_train_loss = 0.0
         
         # saving the state of the model 
         if epoch % 200 == 0 and use_checkpoint and chkp_path is not None:
@@ -306,6 +321,24 @@ def train_model(num_steps, mode, model, data, device, chkp_path = None, use_chec
             print(f'Checkpoint saved at step {epoch}.')
         loss.backward()
         optimizer.step()
+
+    return train_losses, val_losses
+
+@torch.no_grad()
+def evaluate(model, data, mode, device, num_iters = 20):
+    model.eval()
+    total_loss = 0.0
+    for _ in range(num_iters):
+        if mode == 'pretrained':
+            x, y = get_batch(data, 16, 256)
+        else:
+            x, y = get_batch_sft(data, 16, 256)
+        x = x.to(device)
+        y = y.to(device)
+        _, loss = model(x, y)
+        total_loss += loss.item()
+    avg_loss = total_loss / num_iters
+    return avg_loss
 
 #-------------------------------------------------- copying prettrained weights from gpt2
 
@@ -344,7 +377,7 @@ def load_pretrained(model_type = 'gpt2', dropout = 0.0):
     assert not missed, f'не заполнены веса: {missed}'
     return model
 
-#-------------------------------------------------- testing pretrained model
+#-------------------------------------------------- SFT
 base = load_pretrained('gpt2').to(device)
 
 # using Lora to speed up training
@@ -353,22 +386,32 @@ lora_config = LoraConfig(r = 8,
                          target_modules = ["c_attn", "c_proj", "c_fc"],
                          lora_dropout = 0.05,
                          bias = "none")
-#checkpoint load
-if os.path.exists('lora_sft_ckpt'):
-    gpt = PeftModel.from_pretrained(base, 'lora_sft_ckpt', is_trainable = True)
-else:
-    gpt = get_peft_model(base, lora_config)
+
+gpt = load_checkpoint_lora(base, 'lora_sft_ckpt', loading = False)
 
 # sft data
 df = load_dataset('tatsu-lab/alpaca')
 examples = process_dataset(df)
 
 
-train_model(num_steps=1000,
+train_losses, val_losses = train_model(num_steps=60,
             mode = 'lora',
             model = gpt,
-            data = examples,
+            train_data = examples[:int(len(examples)*0.9)],
+            val_data = examples[int(len(examples)*0.9):],
             device = device,
             use_checkpoint=False)
 
+
+#-------------------------------------------------- saving results
 gpt.save_pretrained('lora_sft_ckpt')
+history = {'train_losses': train_losses, 'val_losses': val_losses}
+with open('lora_sft_ckpt/history.json', 'w') as f:
+    json.dump(history, f)
+
+
+
+# -------------------------------------------------- testing lora model
+# gpt.eval()
+# prompt = "###Instruction:\nWrite a function to reverse a string\n\n###Response:\n"
+# print(complete(gpt, prompt, max_new_tokens=100))
