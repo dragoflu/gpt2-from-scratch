@@ -1,0 +1,5 @@
+{
+    // единственный интерпретатор, где стоят torch/tiktoken/transformers, см. requirements.txt
+    "python.defaultInterpreterPath": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+    "python-envs.defaultEnvManager": "ms-python.python:system"
+}
