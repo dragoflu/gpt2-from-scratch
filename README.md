@@ -56,9 +56,26 @@ switched off via `disable_adapter()`, so the only difference is the LoRA delta.
 
 Read honestly: the adapter teaches the model the *shape* of an answer, not the task. It stops
 drifting into web-page noise and stays on topic, but 124M parameters and a short LoRA run are
-nowhere near enough for actual instruction following, and it falls into repetition loops on
-anything that needs a short, decisive answer. Reproduce with the block at the end of
+nowhere near enough for actual instruction following. Reproduce with the block at the end of
 [reproducing_gpt-2.py](02-gpt2-from-scratch/reproducing_gpt-2.py#L427).
+
+### Why the second answer loops
+
+The `It is. It is. It is.` collapse is left in on purpose, because it is not random bad luck:
+
+1. **The model was never taught to stop.** `format_example` builds the target as
+   `prompt + output` with no `<|endoftext|>` appended, and padding positions are masked with
+   `-100`. So no end-of-sequence token is ever a training target, and the model has no way to
+   learn that an answer can be over.
+2. **The sampler can't stop either.** [`generate`](02-gpt2-from-scratch/reproducing_gpt-2.py#L169)
+   always runs the full `max_new_tokens` with no EOS break and no repetition penalty.
+3. **Short answers make it worse.** Alpaca classification targets are one or two words, so the
+   distribution right after `###Response:` is sharply peaked; `top_k=50` then keeps resampling
+   from the same tiny high-probability set, and the sequence becomes its own strongest context.
+
+The base model doesn't loop here only because it never entered a short-answer mode in the first
+place; it rambles instead. The fix is not more training: append EOS to SFT targets, train on it,
+and break generation on it. That's the first item in the roadmap below.
 
 ## Repo structure
 
@@ -164,6 +181,8 @@ default (`num_steps=0`); raise it and flip `loading=False` to start a fresh adap
 
 ## Roadmap
 
+- EOS handling end to end: append `<|endoftext|>` to SFT targets, keep it unmasked, stop
+  `generate` on it (see the repetition analysis above)
 - KV-cache in `generate` (currently the full prefix is recomputed for every token)
 - `F.scaled_dot_product_attention` instead of the explicit softmax path
 - RoPE and RMSNorm, to move from GPT-2 to a modern Llama-style block

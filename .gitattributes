@@ -1,0 +1,2 @@
+# иначе linguist считает по байтам и репо помечается как Jupyter Notebook
+*.ipynb linguist-documentation
