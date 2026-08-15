@@ -168,6 +168,7 @@ class GPT2(nn.Module):
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature = 1.0, top_k = 50):
         B, T = idx.size() # starting point
+        seen = torch.zeros((B, self.config.vocab_size), dtype = torch.bool, device = idx.device) # mask for repetition penalty
         for _ in range(max_new_tokens):
             # cutting the context
             idx_cut = idx[:, -self.config.block_size:]
@@ -175,6 +176,9 @@ class GPT2(nn.Module):
             logits, _ = self(idx_cut) # (B, T, vocab)
             logits = logits[:, -1, :] / temperature # (B, vocab)
 
+            #applying repetition penalty
+            logits[seen & (logits > 0)] /= 1.2
+            logits[seen & (logits < 0)] *= 1.2
             #selecting top-k (O(n))
             v, _ = torch.topk(logits, top_k)
             logits[logits < v[:, [-1]]] = float('-inf')
@@ -184,8 +188,13 @@ class GPT2(nn.Module):
 
             #sample
             next_token = torch.multinomial(probs, num_samples = 1)
+            # operations with new token
             if next_token.item() == enc.eot_token:
                 break # end of sequence
+
+            # marking repetition penalty
+            seen.scatter_(1, next_token, True)
+
             #concat
             idx = torch.cat((idx, next_token), dim = 1)
             #streaming
@@ -193,6 +202,8 @@ class GPT2(nn.Module):
 
         print()
         return idx
+
+
 
 @torch.no_grad()
 def complete(model, prompt, max_new_tokens = 250, temperature = 0.9, top_k = 50):
