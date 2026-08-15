@@ -184,6 +184,8 @@ class GPT2(nn.Module):
 
             #sample
             next_token = torch.multinomial(probs, num_samples = 1)
+            if next_token.item() == enc.eot_token:
+                break # end of sequence
             #concat
             idx = torch.cat((idx, next_token), dim = 1)
             #streaming
@@ -210,7 +212,7 @@ enc = tiktoken.get_encoding('gpt2')
 data = torch.tensor(enc.encode(text), dtype = torch.long)
 
 def pad_to(data, seq_len, pad_token = 50256):
-    return data + [pad_token] * (seq_len - len(data)) 
+    return data + [pad_token] * (seq_len - len(data))
 
 
 #checkpoint load for lora
@@ -257,7 +259,8 @@ def process_dataset(data):
     examples = []
     for ex in data:
         promt, full = format_example(ex)
-        full_ids = enc.encode(full)[:256]
+        full_ids = enc.encode(full) + [enc.eot_token] # end of sequence token, чтобы модель не генерировала дальше
+        full_ids = full_ids[:256] # обрезаем, чтобы не превышать block_size
         promt_len = len(enc.encode(promt))
         examples.append((full_ids, promt_len)) # tokenized sentence and a boarder
     return examples
