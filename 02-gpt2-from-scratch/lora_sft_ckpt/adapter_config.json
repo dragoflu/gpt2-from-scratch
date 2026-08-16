@@ -35,8 +35,8 @@
   "revision": null,
   "target_modules": [
     "c_attn",
-    "c_proj",
-    "c_fc"
+    "c_fc",
+    "c_proj"
   ],
   "target_parameters": null,
   "task_type": null,
