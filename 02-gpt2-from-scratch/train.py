@@ -1,7 +1,7 @@
 import os
 import torch
 from peft import get_peft_model, PeftModel
-
+from model import MyAdam
 from data import get_batch, get_batch_sft, enc
 
 
@@ -46,7 +46,8 @@ def train_model(num_steps, mode, model, train_data, val_data, device, ckpt_path 
         learning_rate = 3e-5
     else:
         learning_rate = 1e-4
-    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr = learning_rate)
+    # optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr = learning_rate)
+    optimizer = MyAdam([p for p in model.parameters() if p.requires_grad], lr = learning_rate)
     start_step = load_checkpoint(model, optimizer, ckpt_path, loading = loading)
     total_train_loss = 0.0
     for epoch in range(start_step, start_step + num_steps):

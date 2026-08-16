@@ -222,3 +222,41 @@ def load_pretrained(model_type = 'gpt2', dropout = 0.0):
     missed = [k for k in sd if k not in copied and not k.endswith('.mask')]
     assert not missed, f'не заполнены веса: {missed}'
     return model
+
+class MyAdam:
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8):
+        self.params = params
+        self.lr = lr
+        self.b1 = betas[0]
+        self.b2 = betas[1]
+        self.eps = eps
+        self.m = [torch.zeros_like(p) for p in params]
+        self.v = [torch.zeros_like(p) for p in params]
+        self.t = 0.0
+
+    def step(self):
+        self.t += 1.0
+        with torch.no_grad():
+            for i, p in enumerate(self.params):
+                if p.grad is None:
+                    continue
+                g = p.grad
+                self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * g
+                self.v[i] = self.b2 * self.v[i] + (1 - self.b2) * (g ** 2)
+
+                self.m_hat = self.m[i] / (1 - (self.b1 ** self.t))
+                self.v_hat = self.v[i] / (1 - (self.b2 ** self.t))
+
+                p -= self.lr * self.m_hat / (torch.sqrt(self.v_hat) + self.eps)
+
+    def state_dict(self):
+        return {'t': self.t, 'm': self.m, 'v': self.v}
+
+    def load_state_dict(self, state_dict):
+        self.t = state_dict['t']
+        self.m = state_dict['m']
+        self.v = state_dict['v']
+
+    def zero_grad(self):
+        for p in self.params:
+            p.grad = torch.zeros_like(p)

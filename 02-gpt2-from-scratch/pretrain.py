@@ -12,18 +12,21 @@ small = GPT2(config).to(device) # рандомная инициализация
 loading = False # хотим ли подгружать чекппоинт
 
 data = load_shakespeare()
-n = int(len(data) * 0.9)
-train_data = data[:n]
-val_data = data[n:]
+val_start = int(len(data) * 0.8)
+val_end = int(len(data) * 0.9)
+train_data = data[:val_start]
+val_data = data[val_start:val_end]
+test_data = data[val_end:]
 
-train_losses, val_losses, best_loss = train_model(num_steps = 500, 
+train_losses, val_losses, best_loss = train_model(num_steps = 5000, 
             mode = 'pretrained',
             model = small,
             train_data = train_data,
             val_data = val_data,
             device = device,
             loading = loading,
-            ckpt_path = PRETRAIN_CKPT_DIR)
+            ckpt_path = PRETRAIN_CKPT_DIR,
+            patience = 20)
 
 ppl_before = math.exp(val_losses[0])
 ppl_after = math.exp(val_losses[-1])
