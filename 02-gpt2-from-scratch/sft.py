@@ -6,7 +6,7 @@ from peft import LoraConfig
 
 from config import CKPT_DIR, device
 from model import load_pretrained
-from data import process_dataset
+from data import process_dataset, SFTDataset
 from train import load_checkpoint_lora, train_model, complete
 
 base = load_pretrained('gpt2').to(device)
@@ -23,14 +23,18 @@ gpt = load_checkpoint_lora(base, CKPT_DIR, lora_config, loading = False).to(devi
 # sft data
 df = load_dataset('tatsu-lab/alpaca')
 examples = process_dataset(df)
+split = int(len(examples) * 0.9)
+train_data = SFTDataset(examples[:split])
+val_data = SFTDataset(examples[split:])
 
 train_losses, val_losses = train_model(num_steps = 50,
             mode = 'lora',
             model = gpt,
-            train_data = examples[:int(len(examples)*0.9)],
-            val_data = examples[int(len(examples)*0.9):],
+            train_data = train_data,
+            val_data = val_data,
             device = device,
-            use_checkpoint = False)
+            batch_size = 4,
+            loading = False)
 
 ppl_before = math.exp(val_losses[0])
 ppl_after = math.exp(val_losses[-1])

@@ -2,7 +2,7 @@ import os
 import torch
 from peft import get_peft_model, PeftModel
 from model import MyAdam
-from data import get_batch, get_batch_sft, enc
+from data import get_dataloader, infinite_batches, sft_collate, enc
 
 
 #checkpoint load for lora
@@ -36,7 +36,7 @@ def load_checkpoint(model, optimizer, chkp_path, loading = True):
 #------------------------------------------------- TRAINING CYCLE
 
 # full training loop (pretrained, sft, lora) with checkpointing
-def train_model(num_steps, mode, model, train_data, val_data, device, ckpt_path = None, patience = None, min_delta = 1e-3, loading = True):
+def train_model(num_steps, mode, model, train_data, val_data, device, batch_size = 16, ckpt_path = None, patience = None, min_delta = 1e-3, loading = True):
     train_losses, val_losses = [], []
     best_loss = float('inf')
     patience_counter = 0
@@ -50,11 +50,10 @@ def train_model(num_steps, mode, model, train_data, val_data, device, ckpt_path 
     optimizer = MyAdam([p for p in model.parameters() if p.requires_grad], lr = learning_rate)
     start_step = load_checkpoint(model, optimizer, ckpt_path, loading = loading)
     total_train_loss = 0.0
+    collate_fn = None if mode == 'pretrained' else sft_collate
+    train_loader = infinite_batches(get_dataloader(train_data, batch_size, shuffle = True, collate_fn = collate_fn))
     for epoch in range(start_step, start_step + num_steps):
-        if mode == 'pretrained':
-            x, y = get_batch(train_data, 16, 256)
-        else:
-            x, y = get_batch_sft(train_data, 4, 256)
+        x, y = next(train_loader)
         x = x.to(device)
         y = y.to(device)
         optimizer.zero_grad()
@@ -95,15 +94,14 @@ def train_model(num_steps, mode, model, train_data, val_data, device, ckpt_path 
 
 
 @torch.no_grad()
-def evaluate(model, data, mode, device, num_iters = 20):
+def evaluate(model, data, mode, device, batch_size = 16, num_iters = 20):
     was_training = model.training
     model.eval()
     total_loss = 0.0
+    collate_fn = None if mode == 'pretrained' else sft_collate
+    loader = infinite_batches(get_dataloader(data, batch_size, shuffle = True, collate_fn = collate_fn))
     for _ in range(num_iters):
-        if mode == 'pretrained':
-            x, y = get_batch(data, 16, 256)
-        else:
-            x, y = get_batch_sft(data, 16, 256)
+        x, y = next(loader)
         x = x.to(device)
         y = y.to(device)
         _, loss = model(x, y)

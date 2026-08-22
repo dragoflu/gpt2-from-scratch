@@ -4,37 +4,6 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-class MyAdam:
-    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8):
-        self.params = params
-        self.lr = lr
-        self.b1 = betas[0]
-        self.b2 = betas[1]
-        self.eps = eps
-        self.m = [torch.zeros_like(p) for p in params]
-        self.v = [torch.zeros_like(p) for p in params]
-        self.t = 0.0
-
-    def step(self):
-        self.t += 1.0
-        with torch.no_grad():
-            for i, p in enumerate(self.params):
-                if p.grad is None:
-                    continue
-                g = p.grad
-                self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * g
-                self.v[i] = self.b2 * self.v[i] + (1 - self.b2) * (g ** 2)
-
-                self.m_hat = self.m[i] / (1 - (self.b1 ** self.t))
-                self.v_hat = self.v[i] / (1 - (self.b2 ** self.t))
-
-                p -= self.lr * self.m_hat / (torch.sqrt(self.v_hat) + self.eps)
-
-    def zero_grad(self):
-        for p in self.params:
-            p.grad = torch.zeros_like(p)
-
-
 def apply_rope_for_sing(m):
     B, S, D = m.size()
     pos = torch.arange(S).float()

@@ -1,0 +1,9 @@
+SFT metrics:
+70 epoches
+Perplexity before training: 15.75
+Perplexity after training: 10.83
+
+pretraining:
+920 epoches
+Perplexity before training: 55805.56
+Perplexity after training: 393.77
